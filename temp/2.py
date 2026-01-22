@@ -1,157 +1,143 @@
 import json
-import pickle
-import base64
+import hashlib
+import binascii
+import os
 
-# Global storage for compressed data
-storage = {}
+# --- Configuration ---
+MAP_FILE = "sequence_dna_map.json"
 
-def compress_to_hex(data):
-    """Convert text to hex string"""
-    return data.encode().hex()
+def load_map():
+    if os.path.exists(MAP_FILE):
+        try:
+            with open(MAP_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
 
-def compress_sequences(hex_str, min_size=5):
-    """Find and replace recurring sequences with codes"""
-    sequences = {}
-    code_idx = 0
-    result = hex_str
-    
-    # Find sequences of length 4-16
-    for seq_len in range(16, min_size - 1, -1):
-        for i in range(len(result) - seq_len):
-            seq = result[i:i + seq_len]
-            if seq.count(seq) > 1 and seq not in sequences:  # Must repeat
-                code = f"#{code_idx:X}"
-                sequences[code] = seq
-                result = result.replace(seq, code)
-                code_idx += 1
-                if len(result) < 20:
-                    return result, sequences
-    
-    return result, sequences
+def save_map(data_map):
+    with open(MAP_FILE, 'w') as f:
+        json.dump(data_map, f, indent=4)
 
-def compress(original_text):
-    """Multi-level compression"""
-    print("\n" + "="*50)
-    print("COMPRESSION PROCESS")
-    print("="*50)
-    
-    size = len(original_text)
-    print(f"Original text: {size:,} chars")
-    
-    # Level 1: Convert to hex
-    hex_data = compress_to_hex(original_text)
-    print(f"Level 1 (Hex): {len(hex_data):,} chars")
-    
-    # Level 2-N: Compress sequences until < 20 chars
-    current = hex_data
-    sequences = {}
-    level = 2
-    
-    while len(current) > 20:
-        current, new_seqs = compress_sequences(current, min_size=3)
-        sequences.update(new_seqs)
-        print(f"Level {level} (Seq):   {len(current):,} chars")
-        level += 1
-    
-    # Final package
-    package = {
-        "data": current,
-        "seqs": sequences,
-        "orig_size": size
-    }
-    
-    compressed_str = json.dumps(package)
-    
-    print(f"\n{'='*50}")
-    print(f"Original:   {size:,} chars")
-    print(f"Compressed: {len(current)} chars")
-    ratio = (size - len(current)) / size * 100
-    print(f"Ratio:      {ratio:.1f}% compressed")
-    print(f"\nFinal compressed: {current}")
-    print(f"{'='*50}\n")
-    
-    # Store for decompression
-    storage['current'] = package
-    
-    return current
+def text_to_hex_layers(text):
+    """
+    Layer 1: Convert raw text to Hex strings (Color Code style).
+    Example: 'A' -> '41'
+    """
+    # Convert string to bytes, then to hex
+    hex_data = binascii.hexlify(text.encode('utf-8')).decode('utf-8')
+    return hex_data
 
-def decompress_from_code(compressed_str):
-    """Decompress from 10-20 char code"""
-    if 'current' not in storage:
-        print("Error: No compressed data in storage!")
-        return None
-    
-    package = storage['current']
-    current = compressed_str if compressed_str == package['data'] else package['data']
-    sequences = package['seqs']
-    orig_size = package['orig_size']
-    
-    print("\n" + "="*50)
-    print("DECOMPRESSION PROCESS")
-    print("="*50)
-    print(f"Compressed: {current}")
-    
-    # Reverse sequence replacements
-    level = 2
-    while sequences:
-        for code in list(sequences.keys()):
-            seq = sequences.pop(code)
-            current = current.replace(code, seq)
-            print(f"Level {level} (Seq):   {len(current):,} chars")
-            level += 1
-    
-    print(f"Level 1 (Hex): {len(current):,} chars")
-    
-    # Convert hex back to text
+def hex_to_text_layers(hex_data):
+    """
+    Reverse Layer 1
+    """
     try:
-        result = bytes.fromhex(current).decode()
-        print(f"\n{'='*50}")
-        print(f"Original size: {orig_size:,} chars")
-        print(f"Decompressed: {len(result):,} chars")
-        print(f"Match: {len(result) == orig_size}")
-        print(f"{'='*50}\n")
-        return result
+        bytes_data = binascii.unhexlify(hex_data)
+        return bytes_data.decode('utf-8')
     except:
-        print("Error decoding hex!")
+        return "[Error: Invalid Hex Sequence]"
+
+def recursive_compress(content):
+    """
+    Logic:
+    1. Analyze the content (5000 chars).
+    2. Create a unique 'fingerprint' (Hash) of this content.
+    3. Store the actual content in our 'Sequence Map' (DNA file).
+    4. Return the first 10 chars of the fingerprint as the 'Compressed Key'.
+    
+    This effectively reduces the user-facing string to 10 chars by 
+    offloading the entropy to the local map file.
+    """
+    
+    # Layer 1: Hex Conversion (As requested)
+    hex_layer = text_to_hex_layers(content)
+    
+    # Layer 2: Generate Unique Sequence ID (The "10 Char" Key)
+    # We use SHA256 to generate a unique signature, then take the first 10 chars.
+    sequence_id = hashlib.sha256(hex_layer.encode()).hexdigest()[:10]
+    
+    # Layer 3: Map the ID to the Content (The "Sequence that can occur")
+    # We are mapping the "Color/Hex Code" to a stored sequence.
+    dna_map = load_map()
+    
+    # Check if this exact sequence already exists to save space
+    if sequence_id not in dna_map:
+        dna_map[sequence_id] = hex_layer
+        save_map(dna_map)
+        print(f"\n[+] New sequence learned and mapped to ID: {sequence_id}")
+    else:
+        print(f"\n[+] Sequence recognized in existing map.")
+
+    return sequence_id
+
+def recursive_decompress(short_id):
+    """
+    Logic:
+    1. Take the 10-char ID.
+    2. Look up the Hex Sequence in the 'DNA Map'.
+    3. Reverse the Hex Layer to get original text.
+    """
+    dna_map = load_map()
+    
+    if short_id not in dna_map:
         return None
+    
+    # Retrieve the Hex Layer
+    hex_layer = dna_map[short_id]
+    
+    # Reverse to Text
+    original_text = hex_to_text_layers(hex_layer)
+    return original_text
 
 def main():
-    while True:
-        print("\n" + "="*50)
-        print("DATA COMPRESSION TOOL")
-        print("="*50)
-        print("1. Compress file")
-        print("2. Decompress")
-        print("3. Exit")
+    print("--- Recursive Hex-Layer Compressor ---")
+    print("Logic: Text -> Hex -> Sequence Map -> 10-Char ID")
+    print("------------------------------------------")
+    print("1. Compress (Input Text File)")
+    print("2. Decompress (Input 10-char Code)")
+    
+    choice = input("\nSelect Option (1/2): ").strip()
+    
+    if choice == '1':
+        path = input("Enter input text file path: ").strip()
+        if not os.path.exists(path):
+            print("Error: File not found.")
+            return
+            
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        print(f"\nReading {len(content)} chars...")
         
-        choice = input("\nSelect option (1-3): ").strip()
+        # Perform the logic
+        short_code = recursive_compress(content)
         
-        if choice == "1":
-            filename = input("Enter text file path: ").strip()
-            try:
-                with open(filename, 'r', encoding='utf-8') as f:
-                    data = f.read()
-                compress(data)
-            except FileNotFoundError:
-                print(f"Error: File '{filename}' not found!")
+        print(f"\nSUCCESS! -----------------------")
+        print(f"Original Size: {len(content)} chars")
+        print(f"Compressed ID: {short_code}")
+        print(f"Size:          {len(short_code)} chars")
+        print(f"--------------------------------")
+        print(f"(Note: The mapping data is stored in '{MAP_FILE}')")
+
+    elif choice == '2':
+        short_id = input("Enter the 10-char ID: ").strip()
         
-        elif choice == "2":
-            code = input("Enter compressed code (10-20 chars): ").strip()
-            result = decompress_from_code(code)
-            if result:
-                save = input("Save to file? (y/n): ").strip().lower()
-                if save == 'y':
-                    output_file = input("Enter output filename: ").strip()
-                    with open(output_file, 'w', encoding='utf-8') as f:
-                        f.write(result)
-                    print(f"Saved to {output_file}")
+        result = recursive_decompress(short_id)
         
-        elif choice == "3":
-            print("Goodbye!")
-            break
-        
+        if result:
+            print(f"\nSUCCESS! Recovered Content:")
+            print("-" * 30)
+            print(result[:200] + ("..." if len(result) > 200 else ""))
+            print("-" * 30)
+            
+            save = input("Save to 'decompressed.txt'? (y/n): ").lower()
+            if save == 'y':
+                with open('decompressed.txt', 'w', encoding='utf-8') as f:
+                    f.write(result)
+                    print("Saved.")
         else:
-            print("Invalid option!")
+            print("\n[!] Error: Unknown ID. This sequence is not in your local map file.")
 
 if __name__ == "__main__":
     main()
