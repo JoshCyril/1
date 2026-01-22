@@ -1,110 +1,157 @@
 import json
+import pickle
 import base64
-import sys
 
-def compress(data):
-    """Compress data through multiple layers"""
-    original_size = len(data)
+# Global storage for compressed data
+storage = {}
+
+def compress_to_hex(data):
+    """Convert text to hex string"""
+    return data.encode().hex()
+
+def compress_sequences(hex_str, min_size=5):
+    """Find and replace recurring sequences with codes"""
+    sequences = {}
+    code_idx = 0
+    result = hex_str
     
-    # Layer 1: Run-length encoding
-    rle = []
-    i = 0
-    while i < len(data):
-        char = data[i]
-        count = 1
-        while i + count < len(data) and data[i + count] == char and count < 999:
-            count += 1
-        rle.append(f"{ord(char)},{count}")
-        i += count
-    layer1 = "|".join(rle)
-    print(f"Layer 1 (RLE):           {len(layer1):6} chars")
+    # Find sequences of length 4-16
+    for seq_len in range(16, min_size - 1, -1):
+        for i in range(len(result) - seq_len):
+            seq = result[i:i + seq_len]
+            if seq.count(seq) > 1 and seq not in sequences:  # Must repeat
+                code = f"#{code_idx:X}"
+                sequences[code] = seq
+                result = result.replace(seq, code)
+                code_idx += 1
+                if len(result) < 20:
+                    return result, sequences
     
-    # Layer 2: Remove duplicates and create index
-    parts = layer1.split("|")
-    unique = list(set(parts))
-    index = {val: idx for idx, val in enumerate(unique)}
-    layer2 = "|".join(str(index[p]) for p in parts)
-    print(f"Layer 2 (Index):         {len(layer2):6} chars")
+    return result, sequences
+
+def compress(original_text):
+    """Multi-level compression"""
+    print("\n" + "="*50)
+    print("COMPRESSION PROCESS")
+    print("="*50)
     
-    # Layer 3: Compress to smaller base
-    layer2_data = f"{json.dumps(unique)}:{layer2}"
-    layer3 = base64.b64encode(layer2_data.encode()).decode()
-    print(f"Layer 3 (Base64):        {len(layer3):6} chars")
+    size = len(original_text)
+    print(f"Original text: {size:,} chars")
     
-    # Layer 4: Final compression with metadata
-    final = {
-        "c": layer3,
-        "o": original_size
+    # Level 1: Convert to hex
+    hex_data = compress_to_hex(original_text)
+    print(f"Level 1 (Hex): {len(hex_data):,} chars")
+    
+    # Level 2-N: Compress sequences until < 20 chars
+    current = hex_data
+    sequences = {}
+    level = 2
+    
+    while len(current) > 20:
+        current, new_seqs = compress_sequences(current, min_size=3)
+        sequences.update(new_seqs)
+        print(f"Level {level} (Seq):   {len(current):,} chars")
+        level += 1
+    
+    # Final package
+    package = {
+        "data": current,
+        "seqs": sequences,
+        "orig_size": size
     }
-    compressed = json.dumps(final)
-    print(f"Layer 4 (JSON):          {len(compressed):6} chars")
     
-    ratio = (original_size - len(compressed)) / original_size * 100
+    compressed_str = json.dumps(package)
+    
     print(f"\n{'='*50}")
-    print(f"Original:     {original_size:,} chars")
-    print(f"Compressed:   {len(compressed):,} chars")
-    print(f"Ratio:        {ratio:.2f}% compressed")
+    print(f"Original:   {size:,} chars")
+    print(f"Compressed: {len(current)} chars")
+    ratio = (size - len(current)) / size * 100
+    print(f"Ratio:      {ratio:.1f}% compressed")
+    print(f"\nFinal compressed: {current}")
     print(f"{'='*50}\n")
     
-    return compressed
+    # Store for decompression
+    storage['current'] = package
+    
+    return current
 
-def decompress(compressed):
-    """Decompress data from layers"""
-    final = json.loads(compressed)
-    layer3 = final["c"]
-    original_size = final["o"]
+def decompress_from_code(compressed_str):
+    """Decompress from 10-20 char code"""
+    if 'current' not in storage:
+        print("Error: No compressed data in storage!")
+        return None
     
-    # Layer 3: Decode base64
-    layer2_data = base64.b64decode(layer3).decode()
-    unique_json, layer2 = layer2_data.split(":", 1)
-    unique = json.loads(unique_json)
+    package = storage['current']
+    current = compressed_str if compressed_str == package['data'] else package['data']
+    sequences = package['seqs']
+    orig_size = package['orig_size']
     
-    # Layer 2: Restore from index
-    indices = [int(x) for x in layer2.split("|")]
-    parts = [unique[idx] for idx in indices]
-    layer1 = "|".join(parts)
+    print("\n" + "="*50)
+    print("DECOMPRESSION PROCESS")
+    print("="*50)
+    print(f"Compressed: {current}")
     
-    # Layer 1: Reverse RLE
-    data = []
-    for part in layer1.split("|"):
-        char_code, count = part.split(",")
-        data.append(chr(int(char_code)) * int(count))
+    # Reverse sequence replacements
+    level = 2
+    while sequences:
+        for code in list(sequences.keys()):
+            seq = sequences.pop(code)
+            current = current.replace(code, seq)
+            print(f"Level {level} (Seq):   {len(current):,} chars")
+            level += 1
     
-    result = "".join(data)
+    print(f"Level 1 (Hex): {len(current):,} chars")
     
-    print(f"Decompressed: {len(result):,} chars")
-    print(f"Matches original: {len(result) == original_size}\n")
-    
-    return result
-
-# Main
-if __name__ == "__main__":
-    # Read from file
-    filename = input("Enter text file path: ").strip()
-    
+    # Convert hex back to text
     try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            original_data = f.read()
-        
+        result = bytes.fromhex(current).decode()
         print(f"\n{'='*50}")
-        print("COMPRESSION")
+        print(f"Original size: {orig_size:,} chars")
+        print(f"Decompressed: {len(result):,} chars")
+        print(f"Match: {len(result) == orig_size}")
         print(f"{'='*50}\n")
+        return result
+    except:
+        print("Error decoding hex!")
+        return None
+
+def main():
+    while True:
+        print("\n" + "="*50)
+        print("DATA COMPRESSION TOOL")
+        print("="*50)
+        print("1. Compress file")
+        print("2. Decompress")
+        print("3. Exit")
         
-        compressed = compress(original_data)
+        choice = input("\nSelect option (1-3): ").strip()
         
-        print(f"{'='*50}")
-        print("DECOMPRESSION")
-        print(f"{'='*50}\n")
+        if choice == "1":
+            filename = input("Enter text file path: ").strip()
+            try:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    data = f.read()
+                compress(data)
+            except FileNotFoundError:
+                print(f"Error: File '{filename}' not found!")
         
-        decompressed = decompress(compressed)
+        elif choice == "2":
+            code = input("Enter compressed code (10-20 chars): ").strip()
+            result = decompress_from_code(code)
+            if result:
+                save = input("Save to file? (y/n): ").strip().lower()
+                if save == 'y':
+                    output_file = input("Enter output filename: ").strip()
+                    with open(output_file, 'w', encoding='utf-8') as f:
+                        f.write(result)
+                    print(f"Saved to {output_file}")
         
-        # Verify
-        if original_data == decompressed:
-            print("✓ SUCCESS: Data matches perfectly!")
+        elif choice == "3":
+            print("Goodbye!")
+            break
+        
         else:
-            print("✗ ERROR: Data mismatch!")
-            sys.exit(1)
-    
-    except FileNotFoundError:
-        print(f"Error: File '{filename}' not found!")
-        sys.exit(1)
+            print("Invalid option!")
+
+if __name__ == "__main__":
+    main()
